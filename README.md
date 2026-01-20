@@ -15,7 +15,7 @@ A professional web application for detecting hate speech using advanced NLP with
 1. Install the required packages:
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Running the Application
