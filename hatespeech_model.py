@@ -71,6 +71,71 @@ class ProjectionMLP(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+class SimpleProjectionMLP(nn.Module):
+    """Simpler 2-layer MLP from combined-baseline notebook"""
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, output_size),
+            nn.ReLU(),
+            nn.Linear(output_size, 2)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+class SimpleConcatModel(nn.Module):
+    """
+    Simple concatenation model from combined-baseline notebook.
+    Uses dynamic LayerNorm on embeddings before concatenation.
+    This matches the original training notebook architecture.
+    """
+    def __init__(self, hatebert_model, additional_model, projection_mlp, hidden_size=768,
+                 freeze_additional_model=True):
+        super().__init__()
+        self.hatebert_model = hatebert_model
+        self.additional_model = additional_model
+        self.projection_mlp = projection_mlp
+        self.hidden_size = hidden_size
+        
+        if freeze_additional_model:
+            for param in self.additional_model.parameters():
+                param.requires_grad = False
+    
+    def forward(self, input_ids, attention_mask, additional_input_ids, additional_attention_mask,
+                return_attentions=False):
+        device = input_ids.device
+        
+        # Forward pass through the HateBERT model
+        hatebert_outputs = self.hatebert_model(input_ids=input_ids, attention_mask=attention_mask,
+                                               output_attentions=return_attentions, return_dict=True)
+        hatebert_embeddings = hatebert_outputs.last_hidden_state[:, 0, :]  # CLS token
+        # Dynamic LayerNorm (matching training notebook)
+        hatebert_embeddings = torch.nn.LayerNorm(hatebert_embeddings.size()[1:]).to(device)(hatebert_embeddings)
+        
+        # Forward pass through the Additional Model (frozen)
+        with torch.no_grad():
+            additional_outputs = self.additional_model(input_ids=additional_input_ids, 
+                                                       attention_mask=additional_attention_mask,
+                                                       return_dict=True)
+            additional_embeddings = additional_outputs.last_hidden_state[:, 0, :]  # CLS token
+            # Dynamic LayerNorm (matching training notebook)
+            additional_embeddings = torch.nn.LayerNorm(additional_embeddings.size()[1:]).to(device)(additional_embeddings)
+        
+        # Concatenate the embeddings
+        concatenated_embeddings = torch.cat((hatebert_embeddings, additional_embeddings), dim=1)
+        
+        # Project concatenated embeddings
+        logits = self.projection_mlp(concatenated_embeddings)
+        
+        # Return dummy outputs for compatibility with app
+        batch_size, seq_len = input_ids.size()
+        dummy_rationale_probs = torch.zeros(batch_size, seq_len, device=device)
+        dummy_selector_logits = torch.zeros(batch_size, seq_len, device=device)
+        
+        attns = hatebert_outputs.attentions if (return_attentions and hasattr(hatebert_outputs, "attentions")) else None
+        return logits, dummy_rationale_probs, dummy_selector_logits, attns
+
 class BaseShield(nn.Module):
     """
     Simple base model that concatenates HateBERT and rationale BERT CLS embeddings
@@ -175,43 +240,99 @@ class ConcatModelWithRationale(nn.Module):
         attns = hatebert_out.attentions if (return_attentions and hasattr(hatebert_out, "attentions")) else None
         return logits, rationale_probs, selector_logits, attns
 
-def load_model_from_hf(model_type="altered"):
+def load_model_from_hf(model_type="altered", local_checkpoint_path=None):
     """
-    Load model from Hugging Face Hub
+    Load model from Hugging Face Hub or local checkpoint
     
     Args:
-        model_type: Either "altered" or "base" to choose which model to load
+        model_type: "altered", "base", or "simple" to choose which model to load
+        local_checkpoint_path: Path to local .pth file (overrides model_type with auto-detection)
     """
     
     repo_id = "seffyehl/BetterShield"
     
-    # Choose model and config files based on model_type
-    if model_type.lower() == "altered":
-        model_filename = "AlteredShield.pth"
-        config_filename = "alter_config.json"
-    elif model_type.lower() == "base":
-        model_filename = "BaseShield.pth"
-        config_filename = "base_config.json"
+    # Handle local checkpoint with auto-detection
+    if local_checkpoint_path:
+        print(f"Loading local checkpoint: {local_checkpoint_path}")
+        checkpoint = torch.load(local_checkpoint_path, map_location='cpu', weights_only=False)
+        
+        # Auto-detect model type from checkpoint structure
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            
+            # Check for model type by looking at keys and shapes
+            has_selector = any('selector' in k for k in state_dict.keys())
+            has_cnn = any('temporal_cnn' in k or 'msa_cnn' in k for k in state_dict.keys())
+            
+            # Check projection layer shape to distinguish simple vs base
+            proj_key = 'projection_mlp.layers.0.weight'
+            if proj_key in state_dict:
+                proj_shape = state_dict[proj_key].shape
+                # Simple: [512, 1536] (SimpleProjectionMLP)
+                # Base: [512, 1536] (ProjectionMLP with same dims, but different class)
+                # Altered: [128, 3840] (ProjectionMLP with different dims)
+                is_simple_shape = (proj_shape[0] == 512 and proj_shape[1] == 1536)
+                is_altered_shape = (proj_shape[0] == 128 and proj_shape[1] == 3840)
+            else:
+                is_simple_shape = False
+                is_altered_shape = False
+            
+            if has_selector and has_cnn:
+                detected_type = "altered"
+                print("✓ Detected: Altered Shield (with CNN and selector)")
+            elif is_simple_shape and not has_cnn and not has_selector:
+                # Could be either simple or base - they have same architecture
+                # Use model_type as hint, default to simple if it was requested
+                if model_type == "simple":
+                    detected_type = "simple"
+                    print("✓ Detected: Simple Concat Model (using dynamic LayerNorm)")
+                else:
+                    detected_type = "base"
+                    print("✓ Detected: Base Shield (simple concatenation)")
+            else:
+                detected_type = "base"
+                print("✓ Detected: Base Shield (simple concatenation)")
+            
+            # Override model_type based on detection
+            if model_type != detected_type:
+                print(f"⚠️  Overriding model_type '{model_type}' → '{detected_type}' based on checkpoint")
+                model_type = detected_type
+        
+        # Create minimal config for local model
+        config = {
+            'model_config': {
+                'hatebert_model': 'GroNLP/HateBERT',
+                'rationale_model': 'bert-base-uncased',
+            },
+            'training_config': {
+                'max_length': 512
+            }
+        }
+        model_path = local_checkpoint_path
+        
     else:
-        raise ValueError(f"model_type must be 'altered' or 'base', got '{model_type}'")
-    
-    # Download files
-    model_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=model_filename
-    )
-    
-    config_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=config_filename
-    )
-    
-    # Load config
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
-    # Load checkpoint
-    checkpoint = torch.load(model_path, map_location='cpu')
+        # Download from HuggingFace
+        if model_type.lower() == "altered":
+            model_filename = "AlteredShield.pth"
+            config_filename = "alter_config.json"
+        elif model_type.lower() == "base":
+            model_filename = "BaseShield.pth"
+            config_filename = "base_config.json"
+        elif model_type.lower() == "simple":
+            # Default to local checkpoint if no path provided
+            local_checkpoint_path = ".models/concat_model_reddit_85-15_epochs3_seed42.pth"
+            return load_model_from_hf(model_type="simple", local_checkpoint_path=local_checkpoint_path)
+        else:
+            raise ValueError(f"model_type must be 'altered', 'base', or 'simple', got '{model_type}'")
+        
+        model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+        config_path = hf_hub_download(repo_id=repo_id, filename=config_filename)
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Load checkpoint (weights_only=False needed for older checkpoints)
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     
     # Handle nested config structure (base model uses model_config, altered uses flat structure)
     if 'model_config' in config:
@@ -232,7 +353,19 @@ def load_model_from_hf(model_type="altered"):
     H = hatebert_model.config.hidden_size
     max_length = training_config.get('max_length', 128)
     
-    if model_type.lower() == "base":
+    if model_type.lower() == "simple":
+        # Simple Concat Model: From combined-baseline notebook with dynamic LayerNorm
+        # Input: 768 (HateBERT CLS) + 768 (BERT CLS) = 1536
+        projection_mlp = SimpleProjectionMLP(input_size=1536, output_size=512)
+        
+        model = SimpleConcatModel(
+            hatebert_model=hatebert_model,
+            additional_model=rationale_model,
+            projection_mlp=projection_mlp,
+            hidden_size=H,
+            freeze_additional_model=True
+        )
+    elif model_type.lower() == "base":
         # Base Shield: Simple concatenation model
         # Input: 768 (HateBERT CLS) + 768 (Rationale BERT CLS) = 1536
         proj_input_dim = H * 2  # 1536
@@ -277,7 +410,12 @@ def load_model_from_hf(model_type="altered"):
             cnn_dropout=cnn_dropout
         )
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load state dict - handle different checkpoint formats
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        # HuggingFace models store the state dict directly
+        model.load_state_dict(checkpoint)
     model.eval()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

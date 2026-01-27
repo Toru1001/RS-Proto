@@ -15,9 +15,9 @@ st.set_page_config(
 
 # Cached model loading function
 @st.cache_resource
-def load_cached_model(model_type="altered"):
+def load_cached_model(model_type="altered", local_checkpoint_path=None):
     """Load and cache the model"""
-    return load_model_from_hf(model_type=model_type)
+    return load_model_from_hf(model_type=model_type, local_checkpoint_path=local_checkpoint_path)
 
 # Custom CSS
 st.markdown("""
@@ -65,12 +65,17 @@ col_a, col_b, col_c = st.columns([1, 2, 1])
 with col_b:
     model_type = st.radio(
         "Select Model:",
-        ["Altered Shield (Advanced)", "Base Shield (Simple)"],
+        ["Altered Shield (Advanced)", "Base Shield (Simple)", "Simple Concat (Baseline)"],
         horizontal=True,
-        help="Altered Shield uses the full architecture with CNNs and attention. Base Shield is a simpler baseline."
+        help="Altered Shield: Full architecture with CNNs and attention (may have loading issues). Base Shield: HuggingFace baseline. Simple Concat: Your trained baseline model."
     )
     
-model_choice = "altered" if "Altered" in model_type else "base"
+if "Altered" in model_type:
+    model_choice = "altered"
+elif "Base" in model_type:
+    model_choice = "base"
+else:
+    model_choice = "simple"
 
 # Load model with spinner
 with st.spinner('🔄 Loading model... This may take a moment on first run.'):
