@@ -3,6 +3,10 @@ import torch
 import torch.nn as nn
 import json
 from transformers import AutoModel, AutoTokenizer
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score, confusion_matrix
+from time import time
+import psutil
+import os
 
 # Model Architecture Classes
 class TemporalCNN(nn.Module):
@@ -184,6 +188,7 @@ def load_model_from_hf(model_type="altered"):
     """
     
     repo_id = "seffyehl/BetterShield"
+    repo_type = "e5912f6e8c34a10629cfd5a7971ac71ac76d0e9d"
     
     # Choose model and config files based on model_type
     if model_type.lower() == "altered":
@@ -198,12 +203,14 @@ def load_model_from_hf(model_type="altered"):
     # Download files
     model_path = hf_hub_download(
         repo_id=repo_id,
+        revision=repo_type,
         filename=model_filename
     )
     
     config_path = hf_hub_download(
         repo_id=repo_id,
-        filename=config_filename
+        filename=config_filename,
+        revision=repo_type
     )
     
     # Load config
@@ -355,6 +362,79 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
         'rationale_scores': rationale_probs[0].cpu().numpy(),
         'tokens': tokenizer_hatebert.convert_ids_to_tokens(input_ids[0])
     }
+
+def predict_hatespeech_from_file(text_list, rationale_list, true_label, model, tokenizer_hatebert, tokenizer_rationale, config, device):
+    """
+    Predict hate speech for text read from a file
+    
+    Args:
+        text_list: List of input texts to classify
+        rationale_list: List of rationale/explanation texts
+        true_label: True label for evaluation
+        model: Loaded model
+        tokenizer_hatebert: HateBERT tokenizer
+        tokenizer_rationale: Rationale tokenizer
+        config: Model configuration
+        device: Device to run on
+    Returns:
+        f1_score: F1 score for the predictions
+        accuracy: Accuracy for the predictions
+        precision: Precision for the predictions
+        recall: Recall for the predictions
+        confusion_matrix: Confusion matrix as a 2D list
+        cpu_usage: CPU usage during prediction
+        memory_usage: Memory usage during prediction
+        runtime: Total runtime for predictions
+    """
+    predictions = []
+    cpu_percent_list = []
+    memory_percent_list = []
+
+    process = psutil.Process(os.getpid())
+    start_time = time()
+    for idx, (text, rationale) in enumerate(zip(text_list, rationale_list)):
+        result = predict_text(
+            text=text,
+            rationale=rationale,
+            model=model,
+            tokenizer_hatebert=tokenizer_hatebert,
+            tokenizer_rationale=tokenizer_rationale,
+            device=device,
+            max_length=config.get('max_length', 128)
+        )
+        predictions.append(result['prediction'])
+        # Log resource usage every 10th sample and at end to reduce overhead
+        if idx % 10 == 0 or idx == len(text_list) - 1:
+            cpu_percent_list.append(process.cpu_percent())
+            memory_percent_list.append(process.memory_info().rss / 1024 / 1024)
+
+    end_time = time()
+    runtime = end_time - start_time
+    # Calculate metrics
+    f1 = f1_score(true_label, predictions, zero_division=0)
+    accuracy = accuracy_score(true_label, predictions)
+    precision = precision_score(true_label, predictions, zero_division=0)
+    recall = recall_score(true_label, predictions, zero_division=0)
+    cm = confusion_matrix(true_label, predictions).tolist()
+    
+    avg_cpu = sum(cpu_percent_list) / len(cpu_percent_list) if cpu_percent_list else 0
+    avg_memory = sum(memory_percent_list) / len(memory_percent_list) if memory_percent_list else 0  
+    peak_memory = max(memory_percent_list) if memory_percent_list else 0
+    peak_cpu = max(cpu_percent_list) if cpu_percent_list else 0
+
+    return {
+        'f1_score': f1,
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'confusion_matrix': cm,
+        'cpu_usage': avg_cpu,
+        'memory_usage': avg_memory,
+        'peak_cpu_usage': peak_cpu,
+        'peak_memory_usage': peak_memory,
+        'runtime': runtime
+    }
+
 
 def predict_hatespeech(text, rationale, model, tokenizer_hatebert, tokenizer_rationale, config, device):
     """

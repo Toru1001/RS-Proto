@@ -1,10 +1,13 @@
 import streamlit as st
-from hatespeech_model import predict_hatespeech, load_model_from_hf
+from hatespeech_model import predict_hatespeech, load_model_from_hf, predict_hatespeech_from_file
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
 import time
+
+
+is_file_uploader_visible = False
 
 # Page configuration
 st.set_page_config(
@@ -87,6 +90,11 @@ with st.sidebar:
     st.markdown(f"**Device:** {device.upper()}")
     st.markdown(f"**Max Length:** {config.get('max_length', 128)}")
     st.markdown(f"**CNN Filters:** {config.get('cnn_num_filters', 128)}")
+
+    st.divider()
+    st.subheader("🔍 File Upload")
+    is_file_uploader_visible = st.checkbox("Enable File Upload", value=is_file_uploader_visible)
+
     
     st.divider()
     
@@ -107,19 +115,35 @@ with st.sidebar:
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("📝 Input Text")
-    user_input = st.text_area(
-        "Enter text to analyze:",
-        placeholder="Type or paste text here to check for hate speech...",
-        height=150,
-        help="Enter any text and the model will classify it as hate speech or not"
-    )
-    
-    optional_rationale = st.text_area(
-        "Optional: Provide context or rationale (leave empty to use main text):",
-        placeholder="Why might this be hate speech? (optional)",
-        height=80
-    )
+    if is_file_uploader_visible:
+        user_input = None
+        st.subheader("📂 Upload  File")
+        uploaded_file = st.file_uploader(
+            "Choose a text file (.csv) to analyze:",
+            type=["csv"],
+            help="Upload a text file containing the content you want to analyze for hate speech"
+        )
+        if uploaded_file is not None:
+            try:
+                file_content = pd.read_csv(uploaded_file, usecols=['text', 'CF_Rationales', 'label'])
+                st.success("✅ File loaded successfully! Scroll down to analyze.")
+            except Exception as e:
+                st.error(f"❌ Error reading file: {str(e)}")
+                user_input = ""
+    else:
+        st.subheader("📝 Input Text/File")
+        user_input = st.text_area(
+            "Enter text to analyze:",
+            placeholder="Type or paste text here to check for hate speech...",
+            height=150,
+            help="Enter any text and the model will classify it as hate speech or not"
+        )
+        
+        optional_rationale = st.text_area(
+            "Optional: Provide context or rationale (leave empty to use main text):",
+            placeholder="Why might this be hate speech? (optional)",
+            height=80
+        )
 
 with col2:
     st.subheader("📊 Quick Stats")
@@ -128,14 +152,19 @@ with col2:
         char_count = len(user_input)
         st.metric("Words", word_count)
         st.metric("Characters", char_count)
+    if is_file_uploader_visible and uploaded_file is not None:
+        st.markdown(f"**Filename:** {uploaded_file.name}")
+        st.markdown(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
+        file_rows = len(file_content)
+        st.metric("Rows in File", file_rows)
     else:
-        st.info("Enter text to see statistics")
+        st.info("Enter text/file to see statistics")
 
 # Classification button
 classify_button = st.button("🔍 Analyze Text", type="primary", use_container_width=True)
 
 if classify_button:
-    if user_input.strip():
+    if user_input and user_input.strip():
         with st.spinner('🔄 Analyzing text...'):
             # Get prediction
             start = time.time()
@@ -261,6 +290,117 @@ if classify_button:
                             'cnn_filters': config.get('cnn_num_filters'),
                         }
                     })
+    if is_file_uploader_visible and uploaded_file is not None:
+        st.markdown(f"**Filename:** {uploaded_file.name}")
+        st.markdown(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
+        file_rows = len(file_content)
+        st.metric("Rows in File", file_rows)
+        st.markdown("**Preview:**")
+        st.dataframe(file_content.head(3), use_container_width=True)
+        with st.spinner('🔄 Analyzing file... This may take a while for large files.'):
+            # Call the file prediction function here
+            result = predict_hatespeech_from_file(
+                text_list=file_content["text"], 
+                rationale_list=file_content["CF_Rationales"], 
+                tokenizer_rationale=tokenizer_rationale, 
+                tokenizer_hatebert=tokenizer_hatebert, 
+                true_label=file_content["label"], 
+                model=model, 
+                device=device, 
+                config=config
+            )
+            
+            st.success("✅ File analysis complete!")
+            st.divider()
+            st.header("📊 Analysis Results")
+            
+            # Performance Metrics
+            st.subheader("📈 Classification Metrics")
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            with metric_col1:
+                st.metric("F1 Score", f"{result['f1_score']:.4f}")
+            with metric_col2:
+                st.metric("Accuracy", f"{result['accuracy']:.4f}")
+            with metric_col3:
+                st.metric("Precision", f"{result['precision']:.4f}")
+            with metric_col4:
+                st.metric("Recall", f"{result['recall']:.4f}")
+            
+            # Confusion Matrix Visualization
+            st.subheader("🎯 Confusion Matrix")
+            cm = result['confusion_matrix']
+            cm_df = pd.DataFrame(
+                cm,
+                index=['Not Hate Speech', 'Hate Speech'],
+                columns=['Predicted Not Hate', 'Predicted Hate']
+            )
+            
+            fig_cm = go.Figure(data=go.Heatmap(
+                z=cm,
+                x=['Predicted Not Hate', 'Predicted Hate'],
+                y=['True Not Hate Speech', 'True Hate Speech'],
+                colorscale='Blues',
+                text=cm,
+                texttemplate='%{text}',
+                textfont={"size": 16},
+                colorbar=dict(title="Count")
+            ))
+            fig_cm.update_layout(height=400, width=600)
+            st.plotly_chart(fig_cm, use_container_width=True)
+            
+            st.dataframe(cm_df, use_container_width=True)
+            
+            # Resource Usage
+            st.subheader("⚙️ Resource Usage")
+            resource_col1, resource_col2 = st.columns(2)
+            
+            with resource_col1:
+                st.markdown("**CPU Usage**")
+                cpu_data = {
+                    'Metric': ['Average', 'Peak'],
+                    'Usage (%)': [result['cpu_usage'], result['peak_cpu_usage']]
+                }
+                fig_cpu = go.Figure(data=[
+                    go.Bar(
+                        x=cpu_data['Metric'],
+                        y=cpu_data['Usage (%)'],
+                        marker_color=["#68879c", '#ff9800'],
+                        text=[f"{v:.2f}%" for v in cpu_data['Usage (%)']],
+                        textposition='auto',
+                    )
+                ])
+                fig_cpu.update_layout(yaxis_title="CPU Usage (%)", height=350, showlegend=False)
+                st.plotly_chart(fig_cpu, use_container_width=True)
+            
+            with resource_col2:
+                st.markdown("**Memory Usage**")
+                mem_data = {
+                    'Metric': ['Average', 'Peak'],
+                    'Usage (MB)': [result['memory_usage'], result['peak_memory_usage']]
+                }
+                fig_mem = go.Figure(data=[
+                    go.Bar(
+                        x=mem_data['Metric'],
+                        y=mem_data['Usage (MB)'],
+                        marker_color=['#2196F3', '#f44336'],
+                        text=[f"{v:.2f} MB" for v in mem_data['Usage (MB)']],
+                        textposition='auto',
+                    )
+                ])
+                fig_mem.update_layout(yaxis_title="Memory Usage (MB)", height=350, showlegend=False)
+                st.plotly_chart(fig_mem, use_container_width=True)
+            
+            # Runtime Summary
+            st.subheader("⏱️ Performance Summary")
+            summary_col1, summary_col2, summary_col3 = st.columns(3)
+            with summary_col1:
+                st.metric("Total Runtime", f"{result['runtime']:.2f}s")
+            with summary_col2:
+                st.metric("Samples Processed", file_rows)
+            with summary_col3:
+                st.metric("Avg Time/Sample", f"{result['runtime']/file_rows:.3f}s")
+
+
     else:
         st.warning("⚠️ Please enter some text to analyze.")
 
