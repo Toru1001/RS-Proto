@@ -61,27 +61,16 @@ st.markdown("""
 
 # Header
 st.markdown('<div class="main-header">🛡️ Hate Speech Detection System</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Advanced NLP model with explainable AI for detecting hate speech</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Comparing Base vs Enhanced models with explainable AI for detecting hate speech</div>', unsafe_allow_html=True)
 
-# Model selection
-col_a, col_b, col_c = st.columns([1, 2, 1])
-with col_b:
-    model_type = st.radio(
-        "Select Model:",
-        ["Altered Shield (Advanced)", "Base Shield (Simple)"],
-        horizontal=True,
-        help="Altered Shield uses the full architecture with CNNs and attention. Base Shield is a simpler baseline."
-    )
-    
-model_choice = "altered" if "Altered" in model_type else "base"
-
-# Load model with spinner
-with st.spinner('🔄 Loading model... This may take a moment on first run.'):
+# Load both models with spinner
+with st.spinner('🔄 Loading models... This may take a moment on first run.'):
     try:
-        # model, tokenizer_hatebert, tokenizer_rationale, config, device = load_cached_model(model_choice)
-        st.success(f'✅ {model_type} loaded successfully!')
+        # base_model, base_tokenizer_hatebert, base_tokenizer_rationale, base_config, base_device = load_cached_model("base")
+        # enhanced_model, enhanced_tokenizer_hatebert, enhanced_tokenizer_rationale, enhanced_config, enhanced_device = load_cached_model("altered")
+        st.success('✅ Base Shield and Enhanced Shield models loaded successfully!')
     except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
+        st.error(f"❌ Error loading models: {str(e)}")
         st.stop()
 
 # Sidebar
@@ -167,7 +156,6 @@ if classify_button:
     if user_input and user_input.strip():
         with st.spinner('🔄 Analyzing text...'):
             # Get prediction
-            start = time.time()
             # result = predict_hatespeech(
             #     text=user_input,
             #     rationale=optional_rationale if optional_rationale else None,
@@ -177,121 +165,189 @@ if classify_button:
             #     config=config,
             #     device=device
             # )
-            result = predict_text_mock(user_input)
-
-            end = time.time()
+            # Run both models
+            base_start = time.time()
+            base_model_result = predict_text_mock(user_input)
+            base_end = time.time()
+            enhanced_start = time.time()    
+            enhanced_model_result = predict_text_mock(user_input)
+            enhanced_end = time.time()
             
-            # Extract results
-            prediction = result['prediction']
-            confidence = result['confidence']
-            probabilities = result['probabilities']
-            rationale_scores = result['rationale_scores']
-            tokens = result['tokens']
-            processing_time = end - start
+            # Extract results for both models
+            base_prediction = base_model_result['prediction']
+            base_confidence = base_model_result['confidence']
+            base_probabilities = base_model_result['probabilities']
+            base_processing_time = base_end - base_start
+            
+            enhanced_prediction = enhanced_model_result['prediction']
+            enhanced_confidence = enhanced_model_result['confidence']
+            enhanced_probabilities = enhanced_model_result['probabilities']
+            enhanced_rationale_scores = enhanced_model_result['rationale_scores']
+            enhanced_tokens = enhanced_model_result['tokens']
+            enhanced_processing_time = enhanced_end - enhanced_start
             
             # Display results
             st.divider()
             st.header("📈 Analysis Results")
             
-            # Prediction box
-            if prediction == 1:
-                st.markdown(f'<div class="prediction-box hate-speech">🚨 HATE SPEECH DETECTED</div>', 
-                           unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="prediction-box not-hate-speech">✅ NOT HATE SPEECH</div>', 
-                           unsafe_allow_html=True)
+            # Side-by-side results columns
+            base_col, enhanced_col = st.columns(2)
             
-            # Metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Confidence", f"{confidence:.1%}")
-            with col2:
-                st.metric("Not Hate Speech", f"{probabilities[0]:.1%}")
-            with col3:
-                st.metric("Hate Speech", f"{probabilities[1]:.1%}")
-            with col4:
-                st.metric("Processing Time", f"{processing_time:.3f}s")
-            
-            # Probability distribution chart
-            if show_probabilities:
-                st.subheader("📊 Probability Distribution")
-                fig = go.Figure(data=[
-                    go.Bar(
-                        x=['Not Hate Speech', 'Hate Speech'],
-                        y=probabilities,
-                        marker_color=['#66bb6a', '#ef5350'],
-                        text=[f"{p:.1%}" for p in probabilities],
-                        textposition='auto',
-                    )
-                ])
-                fig.update_layout(
-                    yaxis_title="Probability",
-                    yaxis_range=[0, 1],
-                    height=300,
-                    showlegend=False
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Token importance visualization
-            if show_rationale_viz and model_choice == "altered":
-                st.subheader("🔍 Token Importance Analysis")
-                st.caption("Highlighted words show which parts of the text influenced the prediction")
+            # === BASE MODEL RESULTS (LEFT) ===
+            with base_col:
+                st.subheader("🔵 Base Shield Results")
                 
-                # Filter out special tokens and create visualization
-                token_importance = []
-                html_output = "<div style='font-size: 18px; line-height: 2.5; padding: 20px; background-color: #f8f9fa; border-radius: 10px;'>"
-                
-                for token, score in zip(tokens, rationale_scores):
-                    if token not in ['[CLS]', '[SEP]', '[PAD]']:
-                        # Clean token
-                        display_token = token.replace('##', '')
-                        token_importance.append({'Token': display_token, 'Importance': score})
-                        
-                        # Color intensity based on score
-                        alpha = min(score * 1.5, 1.0)  # Scale up visibility
-                        if prediction == 1:  # Hate speech
-                            color = f"rgba(239, 83, 80, {alpha:.2f})"
-                        else:  # Not hate speech
-                            color = f"rgba(102, 187, 106, {alpha:.2f})"
-                        
-                        html_output += f"<span style='background-color: {color}; padding: 4px 8px; margin: 2px; border-radius: 5px; display: inline-block;'>{display_token}</span> "
-                
-                html_output += "</div>"
-                st.markdown(html_output, unsafe_allow_html=True)
-                
-                if prediction == 1:
-                    st.caption("🔴 Darker red = Higher importance for hate speech detection")
+                # Prediction box
+                if base_prediction == 1:
+                    st.markdown(f'<div class="prediction-box hate-speech">🚨 HATE SPEECH DETECTED</div>', 
+                               unsafe_allow_html=True)
                 else:
-                    st.caption("🟢 Darker green = Higher importance for non-hate speech classification")
+                    st.markdown(f'<div class="prediction-box not-hate-speech">✅ NOT HATE SPEECH</div>', 
+                               unsafe_allow_html=True)
                 
-                # Top important tokens
-                st.subheader("📋 Top Important Tokens")
-                df_importance = pd.DataFrame(token_importance)
-                df_importance = df_importance.sort_values('Importance', ascending=False).head(10)
-                df_importance['Importance'] = df_importance['Importance'].apply(lambda x: f"{x:.4f}")
+                # Metrics
+                st.metric("Confidence", f"{base_confidence:.1%}")
+                base_m1, base_m2 = st.columns(2)
+                with base_m1:
+                    st.metric("Not Hate Speech", f"{base_probabilities[0]:.1%}")
+                with base_m2:
+                    st.metric("Hate Speech", f"{base_probabilities[1]:.1%}")
+                st.metric("Processing Time", f"{base_processing_time:.3f}s")
                 
-                st.dataframe(
-                    df_importance,
-                    use_container_width=True,
-                    hide_index=True
-                )
+                # Probability distribution chart
+                if show_probabilities:
+                    st.markdown("**📊 Probability Distribution**")
+                    fig_base = go.Figure(data=[
+                        go.Bar(
+                            x=['Not Hate Speech', 'Hate Speech'],
+                            y=base_probabilities,
+                            marker_color=['#66bb6a', '#ef5350'],
+                            text=[f"{p:.1%}" for p in base_probabilities],
+                            textposition='auto',
+                        )
+                    ])
+                    fig_base.update_layout(
+                        yaxis_title="Probability",
+                        yaxis_range=[0, 1],
+                        height=300,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_base, use_container_width=True)
+                
+                # Technical details for base
+                if show_details:
+                    with st.expander("View Base Model Outputs"):
+                        st.json({
+                            'prediction': int(base_prediction),
+                            'confidence': float(base_confidence),
+                            'probability_not_hate': float(base_probabilities[0]),
+                            'probability_hate': float(base_probabilities[1]),
+                            'device': 'cpu',
+                            'model_config': {
+                                'max_length': '128',
+                            }
+                        })
             
-            # Technical details
-            if show_details:
-                st.subheader("🔧 Technical Details")
-                with st.expander("View Model Outputs"):
-                    st.json({
-                        'prediction': int(prediction),
-                        'confidence': float(confidence),
-                        'probability_not_hate': float(probabilities[0]),
-                        'probability_hate': float(probabilities[1]),
-                        'num_tokens': len([t for t in tokens if t not in ['[CLS]', '[SEP]', '[PAD]']]),
-                        'device': 'cpu',
-                        'model_config': {
-                            'max_length': '128',
-                            'cnn_filters': '128',
-                        }
-                    })
+            # === ENHANCED MODEL RESULTS (RIGHT) ===
+            with enhanced_col:
+                st.subheader("🟢 Enhanced Shield Results")
+                
+                # Prediction box
+                if enhanced_prediction == 1:
+                    st.markdown(f'<div class="prediction-box hate-speech">🚨 HATE SPEECH DETECTED</div>', 
+                               unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="prediction-box not-hate-speech">✅ NOT HATE SPEECH</div>', 
+                               unsafe_allow_html=True)
+                
+                # Metrics
+                st.metric("Confidence", f"{enhanced_confidence:.1%}")
+                enh_m1, enh_m2 = st.columns(2)
+                with enh_m1:
+                    st.metric("Not Hate Speech", f"{enhanced_probabilities[0]:.1%}")
+                with enh_m2:
+                    st.metric("Hate Speech", f"{enhanced_probabilities[1]:.1%}")
+                st.metric("Processing Time", f"{enhanced_processing_time:.3f}s")
+                
+                # Probability distribution chart
+                if show_probabilities:
+                    st.markdown("**📊 Probability Distribution**")
+                    fig_enhanced = go.Figure(data=[
+                        go.Bar(
+                            x=['Not Hate Speech', 'Hate Speech'],
+                            y=enhanced_probabilities,
+                            marker_color=['#66bb6a', '#ef5350'],
+                            text=[f"{p:.1%}" for p in enhanced_probabilities],
+                            textposition='auto',
+                        )
+                    ])
+                    fig_enhanced.update_layout(
+                        yaxis_title="Probability",
+                        yaxis_range=[0, 1],
+                        height=300,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_enhanced, use_container_width=True)
+                
+                # Token importance visualization (only for enhanced)
+                if show_rationale_viz:
+                    st.markdown("**🔍 Token Importance Analysis**")
+                    st.caption("Highlighted words show which parts influenced the prediction")
+                    
+                    # Filter out special tokens and create visualization
+                    token_importance = []
+                    html_output = "<div style='font-size: 16px; line-height: 2.2; padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>"
+                    
+                    for token, score in zip(enhanced_tokens, enhanced_rationale_scores):
+                        if token not in ['[CLS]', '[SEP]', '[PAD]']:
+                            # Clean token
+                            display_token = token.replace('##', '')
+                            token_importance.append({'Token': display_token, 'Importance': score})
+                            
+                            # Color intensity based on score
+                            alpha = min(score * 1.5, 1.0)  # Scale up visibility
+                            if enhanced_prediction == 1:  # Hate speech
+                                color = f"rgba(239, 83, 80, {alpha:.2f})"
+                            else:  # Not hate speech
+                                color = f"rgba(102, 187, 106, {alpha:.2f})"
+                            
+                            html_output += f"<span style='background-color: {color}; padding: 3px 6px; margin: 1px; border-radius: 4px; display: inline-block;'>{display_token}</span> "
+                    
+                    html_output += "</div>"
+                    st.markdown(html_output, unsafe_allow_html=True)
+                    
+                    if enhanced_prediction == 1:
+                        st.caption("🔴 Darker red = Higher importance for hate speech detection")
+                    else:
+                        st.caption("🟢 Darker green = Higher importance for non-hate speech classification")
+                    
+                    # Top important tokens
+                    st.markdown("**📋 Top Important Tokens**")
+                    df_importance = pd.DataFrame(token_importance)
+                    df_importance = df_importance.sort_values('Importance', ascending=False).head(10)
+                    df_importance['Importance'] = df_importance['Importance'].apply(lambda x: f"{x:.4f}")
+                    
+                    st.dataframe(
+                        df_importance,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                
+                # Technical details for enhanced
+                if show_details:
+                    with st.expander("View Enhanced Model Outputs"):
+                        st.json({
+                            'prediction': int(enhanced_prediction),
+                            'confidence': float(enhanced_confidence),
+                            'probability_not_hate': float(enhanced_probabilities[0]),
+                            'probability_hate': float(enhanced_probabilities[1]),
+                            'num_tokens': len([t for t in enhanced_tokens if t not in ['[CLS]', '[SEP]', '[PAD]']]),
+                            'device': 'cpu',
+                            'model_config': {
+                                'max_length': '128',
+                                'cnn_filters': '128',
+                            }
+                        })
     if is_file_uploader_visible and uploaded_file is not None:
         st.markdown(f"**Filename:** {uploaded_file.name}")
         st.markdown(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
@@ -299,108 +355,109 @@ if classify_button:
         st.metric("Rows in File", file_rows)
         st.markdown("**Preview:**")
         st.dataframe(file_content.head(3), use_container_width=True)
-        with st.spinner('🔄 Analyzing file... This may take a while for large files.'):
-            # Call the file prediction function here
-            # result = predict_hatespeech_from_file(
-            #     text_list=file_content["text"], 
-            #     rationale_list=file_content["CF_Rationales"], 
-            #     tokenizer_rationale=tokenizer_rationale, 
-            #     tokenizer_hatebert=tokenizer_hatebert, 
-            #     true_label=file_content["label"], 
-            #     model=model, 
-            #     device=device, 
-            #     config=config
-            # )
-            result = predict_hatespeech_from_file_mock()
-            st.success("✅ File analysis complete!")
+        with st.spinner('🔄 Analyzing file with both models... This may take a while for large files.'):
+            # Run both models on the file
+            # base_result = predict_hatespeech_from_file(...)  # Base model
+            # enhanced_result = predict_hatespeech_from_file(...)  # Enhanced model
+            base_result = predict_hatespeech_from_file_mock()
+            enhanced_result = predict_hatespeech_from_file_mock()
+            
+            st.success("✅ File analysis complete for both models!")
             st.divider()
-            st.header("📊 Analysis Results")
+            st.header("📊 Analysis Results - Model Comparison")
             
-            # Performance Metrics
-            st.subheader("📈 Classification Metrics")
-            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-            with metric_col1:
-                st.metric("F1 Score", f"{result['f1_score']:.4f}")
-            with metric_col2:
-                st.metric("Accuracy", f"{result['accuracy']:.4f}")
-            with metric_col3:
-                st.metric("Precision", f"{result['precision']:.4f}")
-            with metric_col4:
-                st.metric("Recall", f"{result['recall']:.4f}")
+            # Side-by-side results columns
+            base_file_col, enhanced_file_col = st.columns(2)
             
-            # Confusion Matrix Visualization
-            st.subheader("🎯 Confusion Matrix")
-            cm = result['confusion_matrix']
-            cm_df = pd.DataFrame(
-                cm,
-                index=['Not Hate Speech', 'Hate Speech'],
-                columns=['Predicted Not Hate', 'Predicted Hate']
-            )
+            # === BASE MODEL FILE RESULTS (LEFT) ===
+            with base_file_col:
+                st.subheader("🔵 Base Shield Results")
+                
+                # Performance Metrics
+                st.markdown("**📈 Classification Metrics**")
+                base_fm1, base_fm2 = st.columns(2)
+                with base_fm1:
+                    st.metric("F1 Score", f"{base_result['f1_score']:.4f}")
+                    st.metric("Precision", f"{base_result['precision']:.4f}")
+                with base_fm2:
+                    st.metric("Accuracy", f"{base_result['accuracy']:.4f}")
+                    st.metric("Recall", f"{base_result['recall']:.4f}")
+                
+                # Confusion Matrix Visualization
+                st.markdown("**🎯 Confusion Matrix**")
+                base_cm = base_result['confusion_matrix']
+                fig_base_cm = go.Figure(data=go.Heatmap(
+                    z=base_cm,
+                    x=['Pred Not Hate', 'Pred Hate'],
+                    y=['True Not Hate', 'True Hate'],
+                    colorscale='Blues',
+                    text=base_cm,
+                    texttemplate='%{text}',
+                    textfont={"size": 14},
+                    showscale=False
+                ))
+                fig_base_cm.update_layout(height=300)
+                st.plotly_chart(fig_base_cm, use_container_width=True)
+                
+                # Resource Usage
+                st.markdown("**⚙️ Resource Usage**")
+                base_cpu_col, base_mem_col = st.columns(2)
+                with base_cpu_col:
+                    st.metric("Avg CPU", f"{base_result['cpu_usage']:.2f}%")
+                    st.metric("Peak CPU", f"{base_result['peak_cpu_usage']:.2f}%")
+                with base_mem_col:
+                    st.metric("Avg Memory", f"{base_result['memory_usage']:.2f} MB")
+                    st.metric("Peak Memory", f"{base_result['peak_memory_usage']:.2f} MB")
+                
+                # Runtime
+                st.markdown("**⏱️ Performance**")
+                st.metric("Total Runtime", f"{base_result['runtime']:.2f}s")
+                st.metric("Avg Time/Sample", f"{base_result['runtime']/file_rows:.3f}s")
             
-            fig_cm = go.Figure(data=go.Heatmap(
-                z=cm,
-                x=['Predicted Not Hate', 'Predicted Hate'],
-                y=['True Not Hate Speech', 'True Hate Speech'],
-                colorscale='Blues',
-                text=cm,
-                texttemplate='%{text}',
-                textfont={"size": 16},
-                colorbar=dict(title="Count")
-            ))
-            fig_cm.update_layout(height=400, width=600)
-            st.plotly_chart(fig_cm, use_container_width=True)
-            
-            st.dataframe(cm_df, use_container_width=True)
-            
-            # Resource Usage
-            st.subheader("⚙️ Resource Usage")
-            resource_col1, resource_col2 = st.columns(2)
-            
-            with resource_col1:
-                st.markdown("**CPU Usage**")
-                cpu_data = {
-                    'Metric': ['Average', 'Peak'],
-                    'Usage (%)': [result['cpu_usage'], result['peak_cpu_usage']]
-                }
-                fig_cpu = go.Figure(data=[
-                    go.Bar(
-                        x=cpu_data['Metric'],
-                        y=cpu_data['Usage (%)'],
-                        marker_color=["#68879c", '#ff9800'],
-                        text=[f"{v:.2f}%" for v in cpu_data['Usage (%)']],
-                        textposition='auto',
-                    )
-                ])
-                fig_cpu.update_layout(yaxis_title="CPU Usage (%)", height=350, showlegend=False)
-                st.plotly_chart(fig_cpu, use_container_width=True)
-            
-            with resource_col2:
-                st.markdown("**Memory Usage**")
-                mem_data = {
-                    'Metric': ['Average', 'Peak'],
-                    'Usage (MB)': [result['memory_usage'], result['peak_memory_usage']]
-                }
-                fig_mem = go.Figure(data=[
-                    go.Bar(
-                        x=mem_data['Metric'],
-                        y=mem_data['Usage (MB)'],
-                        marker_color=['#2196F3', '#f44336'],
-                        text=[f"{v:.2f} MB" for v in mem_data['Usage (MB)']],
-                        textposition='auto',
-                    )
-                ])
-                fig_mem.update_layout(yaxis_title="Memory Usage (MB)", height=350, showlegend=False)
-                st.plotly_chart(fig_mem, use_container_width=True)
-            
-            # Runtime Summary
-            st.subheader("⏱️ Performance Summary")
-            summary_col1, summary_col2, summary_col3 = st.columns(3)
-            with summary_col1:
-                st.metric("Total Runtime", f"{result['runtime']:.2f}s")
-            with summary_col2:
-                st.metric("Samples Processed", file_rows)
-            with summary_col3:
-                st.metric("Avg Time/Sample", f"{result['runtime']/file_rows:.3f}s")
+            # === ENHANCED MODEL FILE RESULTS (RIGHT) ===
+            with enhanced_file_col:
+                st.subheader("🟢 Enhanced Shield Results")
+                
+                # Performance Metrics
+                st.markdown("**📈 Classification Metrics**")
+                enh_fm1, enh_fm2 = st.columns(2)
+                with enh_fm1:
+                    st.metric("F1 Score", f"{enhanced_result['f1_score']:.4f}")
+                    st.metric("Precision", f"{enhanced_result['precision']:.4f}")
+                with enh_fm2:
+                    st.metric("Accuracy", f"{enhanced_result['accuracy']:.4f}")
+                    st.metric("Recall", f"{enhanced_result['recall']:.4f}")
+                
+                # Confusion Matrix Visualization
+                st.markdown("**🎯 Confusion Matrix**")
+                enhanced_cm = enhanced_result['confusion_matrix']
+                fig_enhanced_cm = go.Figure(data=go.Heatmap(
+                    z=enhanced_cm,
+                    x=['Pred Not Hate', 'Pred Hate'],
+                    y=['True Not Hate', 'True Hate'],
+                    colorscale='Greens',
+                    text=enhanced_cm,
+                    texttemplate='%{text}',
+                    textfont={"size": 14},
+                    showscale=False
+                ))
+                fig_enhanced_cm.update_layout(height=300)
+                st.plotly_chart(fig_enhanced_cm, use_container_width=True)
+                
+                # Resource Usage
+                st.markdown("**⚙️ Resource Usage**")
+                enh_cpu_col, enh_mem_col = st.columns(2)
+                with enh_cpu_col:
+                    st.metric("Avg CPU", f"{enhanced_result['cpu_usage']:.2f}%")
+                    st.metric("Peak CPU", f"{enhanced_result['peak_cpu_usage']:.2f}%")
+                with enh_mem_col:
+                    st.metric("Avg Memory", f"{enhanced_result['memory_usage']:.2f} MB")
+                    st.metric("Peak Memory", f"{enhanced_result['peak_memory_usage']:.2f} MB")
+                
+                # Runtime
+                st.markdown("**⏱️ Performance**")
+                st.metric("Total Runtime", f"{enhanced_result['runtime']:.2f}s")
+                st.metric("Avg Time/Sample", f"{enhanced_result['runtime']/file_rows:.3f}s")
 
 
     else:
@@ -435,8 +492,8 @@ if 'example_text' in st.session_state:
 st.divider()
 st.markdown("""
     <div style='text-align: center; color: gray; padding: 20px;'>
-        <p><b>Hate Speech Detection Model with Rationale Extraction</b></p>
-        <p>Powered by HateBERT + Multi-Scale CNN + Attention Mechanisms</p>
-        <p>Model trained with advanced regularization and early stopping for optimal performance</p>
+        <p><b>Hate Speech Detection Model Comparison</b></p>
+        <p>Base Shield vs Enhanced Shield (HateBERT + Multi-Scale CNN + Attention)</p>
+        <p>Side-by-side comparison for performance evaluation</p>
     </div>
 """, unsafe_allow_html=True)
