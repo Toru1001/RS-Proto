@@ -159,7 +159,7 @@ if classify_button:
             enhanced_start = time.time()    
             enhanced_model_result = predict_hatespeech(
                 text=user_input,
-                rationale=optional_rationale if optional_rationale else None,
+                rationale=optional_rationale if optional_rationale else user_input,
                 model=enhanced_model,
                 tokenizer_hatebert=enhanced_tokenizer_hatebert,
                 tokenizer_rationale=enhanced_tokenizer_rationale,
@@ -172,7 +172,7 @@ if classify_button:
             base_start = time.time()
             base_model_result = predict_hatespeech(
                 text=user_input,
-                rationale=optional_rationale if optional_rationale else None,
+                rationale=optional_rationale if optional_rationale else user_input,
                 model=base_model,
                 tokenizer_hatebert=base_tokenizer_hatebert,
                 tokenizer_rationale=base_tokenizer_rationale,
