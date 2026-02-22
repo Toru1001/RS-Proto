@@ -66,8 +66,8 @@ st.markdown('<div class="sub-header">Comparing Base vs Enhanced models with expl
 # Load both models with spinner
 with st.spinner('🔄 Loading models... This may take a moment on first run.'):
     try:
-        # base_model, base_tokenizer_hatebert, base_tokenizer_rationale, base_config, base_device = load_cached_model("base")
-        # enhanced_model, enhanced_tokenizer_hatebert, enhanced_tokenizer_rationale, enhanced_config, enhanced_device = load_cached_model("altered")
+        base_model, base_tokenizer_hatebert, base_tokenizer_rationale, base_config, base_device = load_cached_model("base")
+        enhanced_model, enhanced_tokenizer_hatebert, enhanced_tokenizer_rationale, enhanced_config, enhanced_device = load_cached_model("altered")
         st.success('✅ Base Shield and Enhanced Shield models loaded successfully!')
     except Exception as e:
         st.error(f"❌ Error loading models: {str(e)}")
@@ -155,23 +155,32 @@ classify_button = st.button("🔍 Analyze Text", type="primary", use_container_w
 if classify_button:
     if user_input and user_input.strip():
         with st.spinner('🔄 Analyzing text...'):
-            # Get prediction
-            # result = predict_hatespeech(
-            #     text=user_input,
-            #     rationale=optional_rationale if optional_rationale else None,
-            #     model=model,
-            #     tokenizer_hatebert=tokenizer_hatebert,
-            #     tokenizer_rationale=tokenizer_rationale,
-            #     config=config,
-            #     device=device
-            # )
             # Run both models
-            base_start = time.time()
-            base_model_result = predict_text_mock(user_input)
-            base_end = time.time()
             enhanced_start = time.time()    
-            enhanced_model_result = predict_text_mock(user_input)
+            enhanced_model_result = predict_hatespeech(
+                text=user_input,
+                rationale=optional_rationale if optional_rationale else None,
+                model=enhanced_model,
+                tokenizer_hatebert=enhanced_tokenizer_hatebert,
+                tokenizer_rationale=enhanced_tokenizer_rationale,
+                config=enhanced_config,
+                device=enhanced_device,
+                model_type="altered"
+            )
             enhanced_end = time.time()
+
+            base_start = time.time()
+            base_model_result = predict_hatespeech(
+                text=user_input,
+                rationale=optional_rationale if optional_rationale else None,
+                model=base_model,
+                tokenizer_hatebert=base_tokenizer_hatebert,
+                tokenizer_rationale=base_tokenizer_rationale,
+                config=base_config,
+                device=base_device,
+                model_type="base"
+            )
+            base_end = time.time()
             
             # Extract results for both models
             base_prediction = base_model_result['prediction']
@@ -359,9 +368,28 @@ if classify_button:
             # Run both models on the file
             # base_result = predict_hatespeech_from_file(...)  # Base model
             # enhanced_result = predict_hatespeech_from_file(...)  # Enhanced model
-            base_result = predict_hatespeech_from_file_mock()
-            enhanced_result = predict_hatespeech_from_file_mock()
-            
+            enhanced_result = predict_hatespeech_from_file(
+                text_list=file_content['text'].tolist(),
+                rationale_list=file_content['CF_Rationales'].tolist(),
+                true_label=file_content['label'].tolist(),
+                model=enhanced_model,
+                tokenizer_hatebert=enhanced_tokenizer_hatebert,
+                tokenizer_rationale=enhanced_tokenizer_rationale,
+                config=enhanced_config,
+                device=enhanced_device,
+                model_type="altered"
+            )
+            base_result = predict_hatespeech_from_file(
+                text_list=file_content['text'].tolist(),
+                rationale_list=file_content['CF_Rationales'].tolist(),
+                true_label=file_content['label'].tolist(),
+                model=base_model,  
+                tokenizer_hatebert=base_tokenizer_hatebert,
+                tokenizer_rationale=base_tokenizer_rationale,
+                config=base_config,
+                device=base_device,
+                model_type="base"
+            )
             st.success("✅ File analysis complete for both models!")
             st.divider()
             st.header("📊 Analysis Results - Model Comparison")

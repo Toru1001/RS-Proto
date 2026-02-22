@@ -1,5 +1,7 @@
 from huggingface_hub import hf_hub_download
 import torch
+from torch.cuda import device
+from torch.nn import functional as F
 import torch.nn as nn
 import json
 from transformers import AutoModel, AutoTokenizer
@@ -10,61 +12,62 @@ import os
 
 # Model Architecture Classes
 class TemporalCNN(nn.Module):
-    def __init__(self, input_dim=768, num_filters=128, kernel_sizes=(2,3,4,5,6,7), dropout=0.3):
+    def __init__(self, hidden_size=768, num_filters=128, kernel_sizes=(2, 3, 4), dropout=0.1, dilation_base=2):
         super().__init__()
+        self.kernel_sizes = kernel_sizes
+        self.dilation_base = dilation_base
         self.convs = nn.ModuleList([
-            nn.Conv1d(input_dim, num_filters, k) for k in kernel_sizes
+            nn.Conv1d(hidden_size, num_filters, k, dilation=dilation_base ** i, padding=0)
+            for i, k in enumerate(kernel_sizes)
         ])
         self.dropout = nn.Dropout(dropout)
-        # Output size is num_filters * num_kernels * 2 (max + mean pooling)
-        self.output_size = num_filters * len(kernel_sizes) * 2
-        
-    def forward(self, x, mask=None):
-        x = x.transpose(1, 2)  # (B, H, L)
-        conv_outs = []
-        for conv in self.convs:
-            c = torch.relu(conv(x))  # (B, num_filters, L')
-            # Both max and mean pooling
-            max_pool = torch.max(c, dim=2)[0]  # (B, num_filters)
-            mean_pool = torch.mean(c, dim=2)   # (B, num_filters)
-            conv_outs.append(max_pool)
-            conv_outs.append(mean_pool)
-        out = torch.cat(conv_outs, dim=1)  # (B, num_filters * len(kernel_sizes) * 2)
-        out = self.dropout(out)
-        return out
+        self.out_dim = num_filters * len(kernel_sizes)
+
+    def _causal_padding(self, x, kernel_size, dilation):
+        padding = (kernel_size - 1) * dilation
+        return F.pad(x, (padding, 0))
+
+    def forward(self, x, attention_mask):
+        mask = attention_mask.unsqueeze(-1)
+        x = x * mask
+        x = x.transpose(1, 2)
+        feats = []
+        for i, conv in enumerate(self.convs):
+            kernel_size = self.kernel_sizes[i]
+            dilation = self.dilation_base ** i
+            x_padded = self._causal_padding(x, kernel_size, dilation)
+            c = F.relu(conv(x_padded))
+            p = F.max_pool1d(c, kernel_size=c.size(2)).squeeze(2)
+            feats.append(p)
+        out = torch.cat(feats, dim=1)
+        return self.dropout(out)
 
 class MultiScaleAttentionCNN(nn.Module):
-    def __init__(self, hidden_size=768, num_filters=128, kernel_sizes=(2,3,4,5,6,7), dropout=0.3):
-        super().__init__()
-        # Convolution layers
-        self.convs = nn.ModuleList([
-            nn.Conv1d(hidden_size, num_filters, k) for k in kernel_sizes
-        ])
-        # Attention layers - output 1 value per filter for attention weighting
-        self.attn = nn.ModuleList([
-            nn.Linear(num_filters, 1) for _ in kernel_sizes
-        ])
-        self.dropout = nn.Dropout(dropout)
-        self.output_size = num_filters * len(kernel_sizes)
-        
-    def forward(self, x, mask=None):
-        x = x.transpose(1, 2)  # (B, H, L)
-        conv_outs = []
-        for conv, attn in zip(self.convs, self.attn):
-            c = torch.relu(conv(x))  # (B, num_filters, L')
-            c_t = c.transpose(1, 2)  # (B, L', num_filters)
-            # Apply attention to get weights
-            w = attn(c_t)  # (B, L', 1)
-            w = torch.softmax(w, dim=1)  # attention weights
-            # Weighted sum pooling
-            pooled = (c_t * w).sum(dim=1)  # (B, num_filters)
-            conv_outs.append(pooled)
-        out = torch.cat(conv_outs, dim=1)  # (B, num_filters * len(kernel_sizes))
-        out = self.dropout(out)
-        return out
+        def __init__(self, hidden_size=768, num_filters=128, kernel_sizes=(2, 3, 4), dropout=0.3):
+            super().__init__()
+            self.convs = nn.ModuleList([
+                nn.Conv1d(hidden_size, num_filters, k) for k in kernel_sizes
+            ])
+            self.attention_fc = nn.Linear(num_filters, 1)
+            self.dropout = nn.Dropout(dropout)
+            self.out_dim = num_filters * len(kernel_sizes)
+    
+        def forward(self, x, mask):
+            x = x.transpose(1, 2)
+            feats = []
+            for conv in self.convs:
+                h = F.relu(conv(x))
+                h = h.transpose(1, 2)
+                attn = self.attention_fc(h).squeeze(-1)
+                attn = attn.masked_fill(mask[:, :attn.size(1)] == 0, -1e9)
+                alpha = F.softmax(attn, dim=1)
+                pooled = torch.sum(h * alpha.unsqueeze(-1), dim=1)
+                feats.append(pooled)
+            out = torch.cat(feats, dim=1)
+            return self.dropout(out)
 
 class ProjectionMLP(nn.Module):
-    def __init__(self, input_size, hidden_size, num_labels, dropout=0.3):
+    def __init__(self, input_size, hidden_size, num_labels):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Linear(input_size, hidden_size),
@@ -75,109 +78,95 @@ class ProjectionMLP(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+class GumbelTokenSelector(nn.Module):
+        def __init__(self, hidden_size, tau=1.0):
+            super().__init__()
+            self.tau = tau
+            self.proj = nn.Linear(hidden_size * 2, 1)
+    
+        def forward(self, token_embeddings, cls_embedding, training=True):
+            B, L, H = token_embeddings.size()
+            cls_exp = cls_embedding.unsqueeze(1).expand(-1, L, -1)
+            x = torch.cat([token_embeddings, cls_exp], dim=-1)
+            logits = self.proj(x).squeeze(-1)
+    
+            if training:
+                probs = F.gumbel_softmax(
+                    torch.stack([logits, torch.zeros_like(logits)], dim=-1),
+                    tau=self.tau,
+                    hard=False
+                )[..., 0]
+            else:
+                probs = torch.sigmoid(logits)
+            return probs, logits
+
 class BaseShield(nn.Module):
     """
     Simple base model that concatenates HateBERT and rationale BERT CLS embeddings
     """
-    def __init__(self, hatebert_model, additional_model, projection_mlp, hidden_size=768,
+    def __init__(self, hatebert_model, additional_model, projection_mlp, device='cpu',
                  freeze_additional_model=True):
         super().__init__()
         self.hatebert_model = hatebert_model
         self.additional_model = additional_model
         self.projection_mlp = projection_mlp
-        self.hidden_size = hidden_size
+        self.device = device
         
         if freeze_additional_model:
             for param in self.additional_model.parameters():
                 param.requires_grad = False
     
-    def forward(self, input_ids, attention_mask, additional_input_ids, additional_attention_mask,
-                return_attentions=False):
-        # Main text through HateBERT - get CLS token only
-        hatebert_out = self.hatebert_model(input_ids=input_ids, attention_mask=attention_mask,
-                                           output_attentions=return_attentions, return_dict=True)
-        hatebert_cls = hatebert_out.last_hidden_state[:, 0, :]  # (B, 768)
-        
-        # Rationale text through frozen BERT - get CLS token only
-        with torch.no_grad():
-            add_out = self.additional_model(input_ids=additional_input_ids,
-                                           attention_mask=additional_attention_mask,
-                                           return_dict=True)
-            rationale_cls = add_out.last_hidden_state[:, 0, :]  # (B, 768)
-        
-        # Concatenate CLS embeddings: (B, 1536)
-        concat_emb = torch.cat((hatebert_cls, rationale_cls), dim=1)
-        
-        # Classification
-        logits = self.projection_mlp(concat_emb)
-        
-        # Return dummy rationale_probs and selector_logits for compatibility with app
-        batch_size = input_ids.size(0)
-        seq_len = input_ids.size(1)
-        dummy_rationale_probs = torch.zeros(batch_size, seq_len, device=input_ids.device)
-        dummy_selector_logits = torch.zeros(batch_size, seq_len, device=input_ids.device)
-        
-        attns = hatebert_out.attentions if (return_attentions and hasattr(hatebert_out, "attentions")) else None
-        return logits, dummy_rationale_probs, dummy_selector_logits, attns
+    def forward(self, input_ids, attention_mask, additional_input_ids, additional_attention_mask):
+        hatebert_outputs = self.hatebert_model(input_ids=input_ids, attention_mask=attention_mask)
+        hatebert_embeddings = hatebert_outputs.last_hidden_state[:, 0, :]
+        hatebert_embeddings = torch.nn.LayerNorm(hatebert_embeddings.size()[1:]).to(self.device)(hatebert_embeddings.to(self.device)).to(self.device)
 
+        additional_outputs = self.additional_model(input_ids=additional_input_ids, attention_mask=additional_attention_mask)
+        additional_embeddings = additional_outputs.last_hidden_state[:, 0, :]
+        additional_embeddings = torch.nn.LayerNorm(additional_embeddings.size()[1:]).to(self.device)(additional_embeddings.to(self.device)).to(self.device)
 
-class ConcatModelWithRationale(nn.Module):
-    def __init__(self, hatebert_model, additional_model, projection_mlp, hidden_size=768,
-                 gumbel_temp=0.5, freeze_additional_model=True, cnn_num_filters=128,
-                 cnn_kernel_sizes=(2,3,4), cnn_dropout=0.3):
+        concatenated_embeddings = torch.cat((hatebert_embeddings, additional_embeddings), dim=1).to(self.device)
+        projected_embeddings = self.projection_mlp(concatenated_embeddings).to(self.device)
+
+        # Return 4 values to match ConcatModel interface (rationale_probs, selector_logits, attentions are None)
+        return projected_embeddings 
+
+class ConcatModel(nn.Module):
+    def __init__(self, hatebert_model, additional_model, temporal_cnn, msa_cnn, selector, projection_mlp, freeze_additional_model=True, freeze_hatebert=True):
         super().__init__()
         self.hatebert_model = hatebert_model
         self.additional_model = additional_model
+        self.temporal_cnn = temporal_cnn
+        self.msa_cnn = msa_cnn
+        self.selector = selector
         self.projection_mlp = projection_mlp
-        self.gumbel_temp = gumbel_temp
-        self.hidden_size = hidden_size
-        
+
         if freeze_additional_model:
-            for param in self.additional_model.parameters():
-                param.requires_grad = False
+            for p in self.additional_model.parameters():
+                p.requires_grad = False
+        if freeze_hatebert:
+            for p in self.hatebert_model.parameters():
+                p.requires_grad = False
+
+    def forward(self, input_ids, attention_mask, additional_input_ids, additional_attention_mask):
+        hate_outputs = self.hatebert_model(input_ids=input_ids, attention_mask=attention_mask)
+        seq_emb = hate_outputs.last_hidden_state
+        cls_emb = seq_emb[:, 0, :]
         
-        self.selector = nn.Linear(hidden_size, 1)
-        self.temporal_cnn = TemporalCNN(input_dim=hidden_size, num_filters=cnn_num_filters,
-                                        kernel_sizes=cnn_kernel_sizes, dropout=cnn_dropout)
-        self.temporal_out_dim = cnn_num_filters * len(cnn_kernel_sizes) * 2
-        self.msa_cnn = MultiScaleAttentionCNN(hidden_size=hidden_size, num_filters=cnn_num_filters,
-                                              kernel_sizes=cnn_kernel_sizes, dropout=cnn_dropout)
-        self.msa_out_dim = self.msa_cnn.output_size
-    
-    def gumbel_sigmoid_sample(self, logits):
-        noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-9) + 1e-9)
-        y = logits + noise
-        return torch.sigmoid(y / self.gumbel_temp)
-    
-    def forward(self, input_ids, attention_mask, additional_input_ids, additional_attention_mask,
-                return_attentions=False):
-        hatebert_out = self.hatebert_model(input_ids=input_ids, attention_mask=attention_mask,
-                                           output_attentions=return_attentions, return_dict=True)
-        hatebert_emb = hatebert_out.last_hidden_state
-        cls_emb = hatebert_emb[:, 0, :]
+        token_probs, token_logits = self.selector(seq_emb, cls_emb, self.training)
+        temporal_feat = self.temporal_cnn(seq_emb, attention_mask)
+        
+        weights = token_probs.unsqueeze(-1)
+        H_r = (seq_emb * weights).sum(dim=1) / (weights.sum(dim=1) + 1e-6)
         
         with torch.no_grad():
-            add_out = self.additional_model(input_ids=additional_input_ids,
-                                           attention_mask=additional_attention_mask,
-                                           return_dict=True)
-            rationale_emb = add_out.last_hidden_state
+            add_outputs = self.additional_model(input_ids=additional_input_ids, attention_mask=additional_attention_mask)
+            add_seq = add_outputs.last_hidden_state
         
-        selector_logits = self.selector(hatebert_emb).squeeze(-1)
-        rationale_probs = self.gumbel_sigmoid_sample(selector_logits)
-        rationale_probs = rationale_probs * attention_mask.float().to(rationale_probs.device)
-        
-        masked_hidden = hatebert_emb * rationale_probs.unsqueeze(-1)
-        denom = rationale_probs.sum(1).unsqueeze(-1).clamp_min(1e-6)
-        pooled_rationale = masked_hidden.sum(1) / denom
-        
-        temporal_features = self.temporal_cnn(hatebert_emb, attention_mask)
-        rationale_features = self.msa_cnn(rationale_emb, additional_attention_mask)
-        
-        concat_emb = torch.cat((cls_emb, temporal_features, rationale_features, pooled_rationale), dim=1)
-        logits = self.projection_mlp(concat_emb)
-        
-        attns = hatebert_out.attentions if (return_attentions and hasattr(hatebert_out, "attentions")) else None
-        return logits, rationale_probs, selector_logits, attns
+        msa_feat = self.msa_cnn(add_seq, additional_attention_mask)
+        concat = torch.cat([cls_emb, temporal_feat, msa_feat, H_r], dim=1)
+        logits = self.projection_mlp(concat)
+        return logits, token_probs, token_logits, hate_outputs.attentions if hasattr(hate_outputs, "attentions") else None
 
 def load_model_from_hf(model_type="altered"):
     """
@@ -187,8 +176,9 @@ def load_model_from_hf(model_type="altered"):
         model_type: Either "altered" or "base" to choose which model to load
     """
     
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     repo_id = "seffyehl/BetterShield"
-    repo_type = "e5912f6e8c34a10629cfd5a7971ac71ac76d0e9d"
+    # repo_type = "e5912f6e8c34a10629cfd5a7971ac71ac76d0e9d"
     
     # Choose model and config files based on model_type
     if model_type.lower() == "altered":
@@ -203,14 +193,14 @@ def load_model_from_hf(model_type="altered"):
     # Download files
     model_path = hf_hub_download(
         repo_id=repo_id,
-        revision=repo_type,
+        # revision=repo_type,
         filename=model_filename
     )
     
     config_path = hf_hub_download(
         repo_id=repo_id,
         filename=config_filename,
-        revision=repo_type
+        # revision=repo_type
     )
     
     # Load config
@@ -246,48 +236,37 @@ def load_model_from_hf(model_type="altered"):
         # The saved model uses 512, not what's in projection_config
         adapter_dim = 512  # hardcoded to match saved weights
         projection_mlp = ProjectionMLP(input_size=proj_input_dim, hidden_size=adapter_dim, 
-                                      num_labels=2, dropout=0.0)
+                                      num_labels=2)
         
         model = BaseShield(
             hatebert_model=hatebert_model,
             additional_model=rationale_model,
             projection_mlp=projection_mlp,
-            hidden_size=H,
-            freeze_additional_model=True
-        )
+            freeze_additional_model=True, 
+            device=device
+        ).to(device)
     else:
-        # Altered Shield: Complex model with CNN and attention
-        cnn_num_filters = model_config.get('cnn_num_filters', 128)
-        # Use extended kernel sizes to match saved model
-        cnn_kernel_sizes = (2, 3, 4, 5, 6, 7)
-        adapter_dim = model_config.get('adapter_dim', 128)
-        cnn_dropout = model_config.get('cnn_dropout', 0.3)
-        
-        # Calculate dimensions
-        # TemporalCNN: num_filters * len(kernel_sizes) * 2 (max + mean pooling)
-        temporal_out_dim = cnn_num_filters * len(cnn_kernel_sizes) * 2
-        # MultiScaleAttentionCNN: num_filters * len(kernel_sizes)
-        msa_out_dim = cnn_num_filters * len(cnn_kernel_sizes)
-        # Total: CLS (768) + TemporalCNN + MSA + pooled_rationale (768)
-        proj_input_dim = H + temporal_out_dim + msa_out_dim + H
-        projection_mlp = ProjectionMLP(input_size=proj_input_dim, hidden_size=adapter_dim, 
-                                      num_labels=2, dropout=0.0)
-        
-        model = ConcatModelWithRationale(
-            hatebert_model=hatebert_model,
-            additional_model=rationale_model,
-            projection_mlp=projection_mlp,
-            hidden_size=H,
-            freeze_additional_model=True,
-            cnn_num_filters=cnn_num_filters,
-            cnn_kernel_sizes=cnn_kernel_sizes,
-            cnn_dropout=cnn_dropout
-        )
+        temporal_cnn = TemporalCNN(hidden_size=768, num_filters=128, kernel_sizes=(2, 3, 4)).to(device)
+        msa_cnn = MultiScaleAttentionCNN(hidden_size=768, num_filters=128, kernel_sizes=(2, 3, 4)).to(device)
+        selector = GumbelTokenSelector(hidden_size=768, tau=1.0).to(device)
+        projection_mlp = ProjectionMLP(input_size=temporal_cnn.out_dim + msa_cnn.out_dim + 768 * 2, hidden_size=512, num_labels=2).to(device)
+        model = ConcatModel(
+            hatebert_model=hatebert_model, 
+            additional_model=rationale_model, 
+            temporal_cnn=temporal_cnn, 
+            msa_cnn=msa_cnn, 
+            selector=selector,
+            projection_mlp=projection_mlp, 
+            freeze_additional_model=True, 
+            freeze_hatebert=True).to(device)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        print(f"Dataset: {checkpoint.get('dataset', 'unknown')}, Seed: {checkpoint.get('seed', 'unknown')}")
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
-    
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
     
     # Create a unified config dict with max_length at top level for compatibility
@@ -298,7 +277,7 @@ def load_model_from_hf(model_type="altered"):
     return model, tokenizer_hatebert, tokenizer_rationale, unified_config, device
 
 def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale, 
-                 device='cpu', max_length=128):
+                 device='cpu', max_length=128, model_type="altered"):
     """
     Predict hate speech for a given text and rationale
     
@@ -310,6 +289,7 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
         tokenizer_rationale: Rationale model tokenizer
         device: 'cpu' or 'cuda'
         max_length: Maximum sequence length
+        model_type: Either "altered" or "base" to determine how to process inputs
     
     Returns:
         prediction: 0 or 1
@@ -342,6 +322,28 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
     add_attention_mask = inputs_rationale['attention_mask'].to(device)
     
     # Inference
+    if model_type.lower() == "base":
+        with torch.no_grad():
+            logits = model(
+                input_ids, 
+                attention_mask, 
+                add_input_ids, 
+                add_attention_mask
+            )
+            
+            # Get probabilities
+            probs = torch.softmax(logits, dim=1)
+            prediction = logits.argmax(dim=1).item()
+            confidence = probs[0, prediction].item()
+        
+        return {
+            'prediction': prediction,
+            'confidence': confidence,
+            'probabilities': probs[0].cpu().numpy(),
+            'rationale_scores': None,  # Base model does not produce token-level rationale scores
+            'tokens': tokenizer_hatebert.convert_ids_to_tokens(input_ids[0])
+        }
+    
     with torch.no_grad():
         logits, rationale_probs, selector_logits, _ = model(
             input_ids, 
@@ -363,7 +365,7 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
         'tokens': tokenizer_hatebert.convert_ids_to_tokens(input_ids[0])
     }
 
-def predict_hatespeech_from_file(text_list, rationale_list, true_label, model, tokenizer_hatebert, tokenizer_rationale, config, device):
+def predict_hatespeech_from_file(text_list, rationale_list, true_label, model, tokenizer_hatebert, tokenizer_rationale, config, device, model_type="altered"):
     """
     Predict hate speech for text read from a file
     
@@ -400,7 +402,8 @@ def predict_hatespeech_from_file(text_list, rationale_list, true_label, model, t
             tokenizer_hatebert=tokenizer_hatebert,
             tokenizer_rationale=tokenizer_rationale,
             device=device,
-            max_length=config.get('max_length', 128)
+            max_length=config.get('max_length', 128),
+            model_type=model_type
         )
         predictions.append(result['prediction'])
         # Log resource usage every 10th sample and at end to reduce overhead
@@ -436,7 +439,7 @@ def predict_hatespeech_from_file(text_list, rationale_list, true_label, model, t
     }
 
 
-def predict_hatespeech(text, rationale, model, tokenizer_hatebert, tokenizer_rationale, config, device):
+def predict_hatespeech(text, rationale, model, tokenizer_hatebert, tokenizer_rationale, config, device, model_type="altered"):
     """
     Predict hate speech for given text
     
@@ -460,7 +463,8 @@ def predict_hatespeech(text, rationale, model, tokenizer_hatebert, tokenizer_rat
         tokenizer_hatebert=tokenizer_hatebert,
         tokenizer_rationale=tokenizer_rationale,
         device=device,
-        max_length=config.get('max_length', 128)
+        max_length=config.get('max_length', 128),
+        model_type=model_type
     )
     
     return result
