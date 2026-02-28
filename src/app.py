@@ -1,5 +1,5 @@
 import streamlit as st
-from hatespeech_model import predict_hatespeech, load_model_from_hf, predict_hatespeech_from_file, predict_hatespeech_from_file_mock, predict_text_mock
+from hatespeech_model import predict_hatespeech, load_model_from_hf, predict_hatespeech_from_file, get_rationale_from_mistral, preprocess_rationale_mistral
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -154,12 +154,22 @@ classify_button = st.button("🔍 Analyze Text", type="primary", use_container_w
 
 if classify_button:
     if user_input and user_input.strip():
-        with st.spinner('🔄 Analyzing text...'):
-            # Run both models
-            enhanced_start = time.time()    
+        with st.spinner('🔄 Generating rationale from Mistral AI...'):
+            # --- Step 1: Get rationale from Mistral ---
+            try:
+                raw_rationale = get_rationale_from_mistral(user_input)
+                cleaned_rationale = preprocess_rationale_mistral(raw_rationale)
+                print(f"Raw rationale from Mistral: {raw_rationale}")
+            except Exception as e:
+                st.error(f"❌ Error generating/processing rationale: {str(e)}")
+                cleaned_rationale = user_input  # fallback to raw input
+            
+        with st.spinner('🔄 Analyzing text with models...'):
+            # Run enhanced model
+            enhanced_start = time.time()
             enhanced_model_result = predict_hatespeech(
                 text=user_input,
-                rationale=optional_rationale if optional_rationale else user_input,
+                rationale=cleaned_rationale,  # use cleaned rationale
                 model=enhanced_model,
                 tokenizer_hatebert=enhanced_tokenizer_hatebert,
                 tokenizer_rationale=enhanced_tokenizer_rationale,
@@ -169,10 +179,11 @@ if classify_button:
             )
             enhanced_end = time.time()
 
+            # Run base model
             base_start = time.time()
             base_model_result = predict_hatespeech(
                 text=user_input,
-                rationale=optional_rationale if optional_rationale else user_input,
+                rationale=cleaned_rationale,  # use cleaned rationale
                 model=base_model,
                 tokenizer_hatebert=base_tokenizer_hatebert,
                 tokenizer_rationale=base_tokenizer_rationale,
@@ -358,10 +369,6 @@ if classify_button:
                             }
                         })
     if is_file_uploader_visible and uploaded_file is not None:
-        st.markdown(f"**Filename:** {uploaded_file.name}")
-        st.markdown(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
-        file_rows = len(file_content)
-        st.metric("Rows in File", file_rows)
         st.markdown("**Preview:**")
         st.dataframe(file_content.head(3), use_container_width=True)
         with st.spinner('🔄 Analyzing file with both models... This may take a while for large files.'):
