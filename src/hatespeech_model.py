@@ -12,10 +12,14 @@ import os
 import numpy as np
 import requests
 import json
+from dotenv import load_dotenv
 
-API_BASE_URL = "https://api.cloudflare.com/client/v4/accounts/8fcfcf97aa4c166eee626b79a67f902d/ai/run/"
-HEADERS = {"Authorization": "Bearer 2Qb-uZ6M8yzkKZmGmcxZGRveNvk3YXBJwhlQyOfP"}
-MODEL_NAME = "@cf/mistralai/mistral-small-3.1-24b-instruct"
+# Load environment variables from .env file
+load_dotenv()
+
+API_BASE_URL = os.getenv("CLOUDFLARE_API_BASE_URL")
+HEADERS = {"Authorization": f"Bearer {os.getenv('CLOUDFLARE_API_TOKEN')}"}
+MODEL_NAME = os.getenv("CLOUDFLARE_MODEL_NAME")
 
 def create_prompt(text):
     return f"""
@@ -380,11 +384,7 @@ def load_model_from_hf(model_type="altered"):
         config = json.load(f)
     
     # Load checkpoint with proper handling for numpy dtypes (PyTorch 2.6+ compatibility)
-    try:
-        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-    except TypeError:
-        # Fallback for older PyTorch versions
-        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     
     # Handle nested config structure (base model uses model_config, altered uses flat structure)
     if 'model_config' in config:
@@ -403,7 +403,6 @@ def load_model_from_hf(model_type="altered"):
     
     # Rebuild architecture based on model type using training_config values when available
     H = hatebert_model.config.hidden_size
-    max_length = training_config.get('max_length', 128)
 
     # common params from training config (use None to allow inference from checkpoint)
     adapter_dim = training_config.get('adapter_dim', training_config.get('adapter_size', None))
@@ -535,40 +534,12 @@ def load_model_from_hf(model_type="altered"):
     
     model = model.to(device)
     
-    # Verify model is in eval mode
-    print(f"Model training mode: {model.training}")
-    print(f"Dropout layers found: {sum(1 for _ in model.modules() if isinstance(_, (nn.Dropout, nn.Dropout1d, nn.Dropout2d, nn.Dropout3d)))}")
-    
     # Create a unified config dict with max_length at top level for compatibility
     unified_config = config.copy()
     if 'max_length' not in unified_config and 'training_config' in config:
         unified_config['max_length'] = training_config.get('max_length', 128)
     
     return model, tokenizer_hatebert, tokenizer_rationale, unified_config, device
-
-
-def combined_loss(logits, labels, rationale_probs, selector_logits, rationale_mask=None, attns=None, attn_weight=0.0, rationale_weight=1.0):
-    cls_loss = F.cross_entropy(logits, labels)
-
-    # supervise selector logits with BCE-with-logits against rationale mask (if available)
-    if rationale_mask is not None:
-        selector_loss = F.binary_cross_entropy_with_logits(selector_logits, rationale_mask.to(selector_logits.device))
-    else:
-        selector_loss = torch.tensor(0.0, device=cls_loss.device)
-
-    # optional attention alignment loss (disabled by default)
-    attn_loss = torch.tensor(0.0, device=cls_loss.device)
-    if attns is not None and attn_weight > 0.0:
-        try:
-            last_attn = attns[-1]  # (B, H, L, L)
-            attn_mass = last_attn.mean(1).mean(1)  # (B, L)
-            attn_loss = F.mse_loss(attn_mass, rationale_mask.to(attn_mass.device))
-        except Exception:
-            attn_loss = torch.tensor(0.0, device=cls_loss.device)
-
-    total_loss = cls_loss + rationale_weight * selector_loss + attn_weight * attn_loss
-    return total_loss, cls_loss.item(), selector_loss.item(), attn_loss.item()
-
 
 def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale, 
                  device='cpu', max_length=128, model_type="altered"):
@@ -622,15 +593,14 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
         probs = F.softmax(scaled_logits, dim=1)
         
         if torch.isnan(probs).any() or torch.isinf(probs).any():
-            print(f"WARNING: NaN or Inf in probabilities. Logits: {logits}")
             # Fallback to uniform distribution
             probs = torch.ones_like(logits) / logits.size(1)
         
         prediction = logits.argmax(dim=1).item()
         confidence = probs[0, prediction].item()
         
-        # Debug: Print logits and probs for first few predictions
-        print(f"Debug - Logits: {logits[0].cpu().numpy()}, Probs: {probs[0].cpu().numpy()}")
+        # # Debug: Print logits and probs for first few predictions
+        # print(f"Debug - Logits: {logits[0].cpu().numpy()}, Probs: {probs[0].cpu().numpy()}")
     
     result = {
         'prediction': prediction,

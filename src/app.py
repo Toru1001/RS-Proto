@@ -1,3 +1,5 @@
+import gc
+
 import streamlit as st
 from hatespeech_model import predict_hatespeech, load_model_from_hf, predict_hatespeech_from_file, get_rationale_from_mistral, preprocess_rationale_mistral
 import plotly.graph_objects as go
@@ -192,6 +194,8 @@ if classify_button:
                 model_type="base"
             )
             base_end = time.time()
+
+            gc.collect()  # Clean up memory after inference
             
             # Extract results for both models
             base_prediction = base_model_result['prediction']
@@ -400,6 +404,8 @@ if classify_button:
             st.success("✅ File analysis complete for both models!")
             st.divider()
             st.header("📊 Analysis Results - Model Comparison")
+
+            gc.collect()  # Clean up memory after file inference
             
             # Side-by-side results columns
             base_file_col, enhanced_file_col = st.columns(2)
