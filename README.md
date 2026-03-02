@@ -1,3 +1,16 @@
+---
+title: Test
+emoji: 🚀
+colorFrom: red
+colorTo: red
+sdk: docker
+app_port: 8501
+tags:
+- streamlit
+pinned: false
+short_description: testing huggingface spaces
+license: mit
+---
 # 🛡️ Hate Speech Detection Streamlit App
 
 A professional web application for detecting hate speech using advanced NLP with explainable AI.
