@@ -9,104 +9,6 @@ from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_sc
 from time import time
 import psutil
 import os
-import numpy as np
-import requests
-import json
-
-API_BASE_URL = "https://api.cloudflare.com/client/v4/accounts/8fcfcf97aa4c166eee626b79a67f902d/ai/run/"
-HEADERS = {"Authorization": "Bearer 2Qb-uZ6M8yzkKZmGmcxZGRveNvk3YXBJwhlQyOfP"}
-MODEL_NAME = "@cf/mistralai/mistral-small-3.1-24b-instruct"
-
-def create_prompt(text):
-    return f"""
-You are a content moderation assistant. Identify the list of [rationales] words or phrases from the text that make it hateful,
-list of [derogatory language], and [list of cuss words] and [hate_classification] such as "hateful" or "non-hateful".
-If there are none, respond exactly with [non-hateful] only.
-Output should be in JSON format only. Text: {text}.
-"""
-
-def run_mistral_model(model, inputs):
-    payload = {"messages": inputs}
-    response = requests.post(f"{API_BASE_URL}{model}", headers=HEADERS, json=payload)
-    response.raise_for_status()
-    return response.json()
-
-def flatten_json_string(json_string):
-    try:
-        obj = json.loads(json_string)
-        return json.dumps(obj, separators=(",", ":"))
-    except:
-        return json_string
-
-def get_rationale_from_mistral(text, retries=10):
-    """
-    Sends text to Mistral AI and returns a cleaned JSON rationale string.
-    Retries if the model returns invalid output or starts with "I cannot".
-    """
-    for attempt in range(retries):
-        try:
-            inputs = [{"role": "user", "content": create_prompt(text)}]
-            output = run_mistral_model(MODEL_NAME, inputs)
-            
-            result = output.get("result", {})
-            response_text = result.get("response", "").strip()
-            
-            if not response_text or response_text.startswith("I cannot"):
-                print(f"⚠️ Model returned 'I cannot...' — retrying ({attempt+1}/{retries})")
-                continue  # retry
-            
-            # Flatten JSON response and clean
-            cleaned_rationale = flatten_json_string(response_text).replace("\n", " ").strip()
-            return cleaned_rationale
-        
-        except requests.exceptions.HTTPError as e:
-            print(f"⚠️ HTTP Error on attempt {attempt+1}: {e}")
-            # If resource exhausted or rate limited, raise
-            if "RESOURCE_EXHAUSTED" in str(e) or e.response.status_code == 429:
-                raise
-    
-    # Fallback if all retries fail
-    return "non-hateful"
-
-def preprocess_rationale_mistral(raw_rationale):
-    """
-    Cleans and standardizes rationale text from Mistral AI.
-    - Removes ```json fences
-    - Fixes escaped quotes
-    - Extracts JSON content
-    - Returns 'non-hateful' if all rationale lists are empty
-    - Otherwise returns a clean, one-line JSON of rationales
-    """
-    try:
-        x = str(raw_rationale).strip()
-
-        # Remove ```json fences
-        if x.startswith("```"):
-            x = x.replace("```json", "").replace("```", "").strip()
-
-        # Fix double quotes
-        x = x.replace('""', '"')
-
-        # Extract JSON object
-        start = x.find("{")
-        end = x.rfind("}") + 1
-        if start == -1 or end == -1:
-            return x.lower()  # fallback
-
-        j = json.loads(x[start:end])
-
-        keys = ["rationales", "derogatory_language", "cuss_words"]
-
-        # If all lists exist and are empty → non-hateful
-        if all(k in j and isinstance(j[k], list) and len(j[k]) == 0 for k in keys):
-            return "non-hateful"
-
-        # Otherwise, return clean JSON of relevant keys
-        cleaned = {k: j.get(k, []) for k in keys}
-        return json.dumps(cleaned).lower()
-
-    except Exception:
-        return str(raw_rationale).lower()
 
 # Model Architecture Classes
 class TemporalCNN(nn.Module):
@@ -379,12 +281,8 @@ def load_model_from_hf(model_type="altered"):
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # Load checkpoint with proper handling for numpy dtypes (PyTorch 2.6+ compatibility)
-    try:
-        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-    except TypeError:
-        # Fallback for older PyTorch versions
-        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+    # Load checkpoint
+    checkpoint = torch.load(model_path, map_location='cpu')
     
     # Handle nested config structure (base model uses model_config, altered uses flat structure)
     if 'model_config' in config:
@@ -404,61 +302,7 @@ def load_model_from_hf(model_type="altered"):
     # Rebuild architecture based on model type using training_config values when available
     H = hatebert_model.config.hidden_size
     max_length = training_config.get('max_length', 128)
-
-    # common params from training config (use None to allow inference from checkpoint)
-    adapter_dim = training_config.get('adapter_dim', training_config.get('adapter_size', None))
-    cnn_num_filters = training_config.get('cnn_num_filters', None)
-    cnn_kernel_sizes = training_config.get('cnn_kernel_sizes', None)
-    cnn_dropout = training_config.get('cnn_dropout', 0.3)
-    freeze_rationale = training_config.get('freeze_additional_model', True)
-    num_labels = training_config.get('num_labels', 2)
-
-    # Infer architecture params from checkpoint state_dict when possible to match saved weights
-    state_dict = None
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-    elif isinstance(checkpoint, dict):
-        # sometimes checkpoint is a raw state_dict saved as dict
-        state_dict = checkpoint
-
-    if state_dict is not None:
-        # infer temporal convs count and filters if present
-        temporal_keys = [k for k in state_dict.keys() if k.startswith('temporal_cnn.convs.') and k.endswith('.weight')]
-        if temporal_keys:
-            try:
-                sample = state_dict[temporal_keys[0]]
-                inferred_num_filters = sample.shape[0]
-                inferred_kernel_count = len(temporal_keys)
-                if cnn_num_filters is None:
-                    cnn_num_filters = int(inferred_num_filters)
-                if cnn_kernel_sizes is None:
-                    cnn_kernel_sizes = training_config.get('cnn_kernel_sizes', (2,3,4,5,6,7))
-            except Exception:
-                pass
-
-        # infer projection dims/adapt size
-        proj_w_key = None
-        for key in ('projection_mlp.layers.0.weight', 'projection_mlp.0.weight', 'projection_mlp.layers.0.weight_orig'):
-            if key in state_dict:
-                proj_w_key = key
-                break
-        if proj_w_key is not None:
-            try:
-                proj_w = state_dict[proj_w_key]
-                inferred_adapter_dim = proj_w.shape[0]
-                if adapter_dim is None:
-                    adapter_dim = int(inferred_adapter_dim)
-            except Exception:
-                pass
-
-    # sensible defaults when neither config nor checkpoint provided values
-    if cnn_num_filters is None:
-        cnn_num_filters = 64  # Changed from 128 to match typical training configs
-    if cnn_kernel_sizes is None:
-        cnn_kernel_sizes = (2, 3, 4, 5, 6, 7)
-    if adapter_dim is None:
-        adapter_dim = 128
-
+    
     if model_type.lower() == "base":
         proj_input_dim = H * 2
         projection_mlp = ProjectionMLP(input_size=proj_input_dim, hidden_size=adapter_dim, num_labels=num_labels)
@@ -615,24 +459,12 @@ def predict_text(text, rationale, model, tokenizer_hatebert, tokenizer_rationale
                 add_attention_mask
             )
         
-        temperature = 1  # Adjust this if needed (e.g., 2.0 for less confidence)
-        scaled_logits = logits / temperature
-        
-        # Get probabilities with numerical stability
-        probs = F.softmax(scaled_logits, dim=1)
-        
-        if torch.isnan(probs).any() or torch.isinf(probs).any():
-            print(f"WARNING: NaN or Inf in probabilities. Logits: {logits}")
-            # Fallback to uniform distribution
-            probs = torch.ones_like(logits) / logits.size(1)
-        
+        # Get probabilities
+        probs = torch.softmax(logits, dim=1)
         prediction = logits.argmax(dim=1).item()
         confidence = probs[0, prediction].item()
-        
-        # Debug: Print logits and probs for first few predictions
-        print(f"Debug - Logits: {logits[0].cpu().numpy()}, Probs: {probs[0].cpu().numpy()}")
     
-    result = {
+    return {
         'prediction': prediction,
         'confidence': confidence,
         'probabilities': probs[0].cpu().numpy(),
