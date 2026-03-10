@@ -22,8 +22,14 @@ st.set_page_config(
 # Cached model loading function
 @st.cache_resource
 def load_cached_model(model_type="altered"):
-    """Load and cache the model"""
-    return load_model_from_hf(model_type=model_type)
+    model, tokenizer_hatebert, tokenizer_rationale, config, device = load_model_from_hf(model_type=model_type)
+    return {
+        "model": model,
+        "tokenizer_hatebert": tokenizer_hatebert,
+        "tokenizer_rationale": tokenizer_rationale,
+        "config": config,
+        "device": device
+    }
 
 def clean_user_input(text):
     """Remove URLs and special characters (except exclamation points) from text"""
@@ -79,8 +85,21 @@ st.markdown('<div class="sub-header">Comparing Base vs Enhanced models with expl
 # Load both models with spinner
 with st.spinner('🔄 Loading models... This may take a moment on first run.'):
     try:
-        base_model, base_tokenizer_hatebert, base_tokenizer_rationale, base_config, base_device = load_cached_model("base")
-        enhanced_model, enhanced_tokenizer_hatebert, enhanced_tokenizer_rationale, enhanced_config, enhanced_device = load_cached_model("altered")
+        base_data = load_cached_model("base")
+        enhanced_data = load_cached_model("altered")
+
+        base_model = base_data["model"]
+        base_tokenizer_hatebert = base_data["tokenizer_hatebert"]
+        base_tokenizer_rationale = base_data["tokenizer_rationale"]
+        base_config = base_data["config"]
+        base_device = base_data["device"]
+
+        enhanced_model = enhanced_data["model"]
+        enhanced_tokenizer_hatebert = enhanced_data["tokenizer_hatebert"]
+        enhanced_tokenizer_rationale = enhanced_data["tokenizer_rationale"]
+        enhanced_config = enhanced_data["config"]
+        enhanced_device = enhanced_data["device"]
+
         st.success('✅ Base Shield and Enhanced Shield models loaded successfully!')
     except Exception as e:
         st.error(f"❌ Error loading models: {str(e)}")
@@ -334,30 +353,31 @@ if classify_button:
                     
                     # Filter out special tokens and create visualization
                     token_importance = []
-                    html_output = "<div style='font-size: 16px; line-height: 2.2; padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>"
+                    html_output = "<div style='font-size: 16px; line-height: 2.2; padding: 15px; background-color: #0E1117; border-radius: 10px;'>"
                     
                     for token, score in zip(enhanced_tokens, enhanced_rationale_scores):
                         if token not in ['[CLS]', '[SEP]', '[PAD]']:
                             # Clean token
                             display_token = token.replace('##', '')
                             token_importance.append({'Token': display_token, 'Importance': score})
-                            
+                            thresholds = [0.25, 0.5, 0.75]
                             # Color intensity based on score
                             alpha = min(score * 1.5, 1.0)  # Scale up visibility
-                            if enhanced_prediction == 1:  # Hate speech
-                                color = f"rgba(239, 83, 80, {alpha:.2f})"
-                            else:  # Not hate speech
-                                color = f"rgba(102, 187, 106, {alpha:.2f})"
+                            color = f"rgba(239, 83, 80, {alpha:.2f})"
+                            # if score > 0.5:
+                            #     color = f"rgba(239, 83, 80, {alpha:.2f})"
+                            # else:
+                            #     color = f"rgba(242, 155, 5, {alpha:.2f})"
+                            # if enhanced_prediction == 1:  # Hate speech
+                            #     color = f"rgba(239, 83, 80, {alpha:.2f})"
+                            # else:  # Not hate speech
+                            #     color = f"rgba(102, 187, 106, {alpha:.2f})"
                             
                             html_output += f"<span style='background-color: {color}; padding: 3px 6px; margin: 1px; border-radius: 4px; display: inline-block;'>{display_token}</span> "
                     
                     html_output += "</div>"
                     st.markdown(html_output, unsafe_allow_html=True)
-                    
-                    if enhanced_prediction == 1:
-                        st.caption("🔴 Darker red = Higher importance for hate speech detection")
-                    else:
-                        st.caption("🟢 Darker green = Higher importance for non-hate speech classification")
+                    st.caption("🔴 Darker red = More influence on hate speech detection.")
                     
                     # Top important tokens
                     st.markdown("**📋 Top Important Tokens**")
@@ -473,7 +493,6 @@ if classify_button:
             with enhanced_file_col:
                 st.subheader("🟢 Enhanced Shield Results")
                 
-                # Performance Metrics
                 st.markdown("**📈 Classification Metrics**")
                 enh_fm1, enh_fm2 = st.columns(2)
                 with enh_fm1:
@@ -499,7 +518,6 @@ if classify_button:
                 fig_enhanced_cm.update_layout(height=300)
                 st.plotly_chart(fig_enhanced_cm, use_container_width=True)
                 
-                # Resource Usage
                 st.markdown("**⚙️ Resource Usage**")
                 enh_cpu_col, enh_mem_col = st.columns(2)
                 with enh_cpu_col:
